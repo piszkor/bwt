@@ -4,6 +4,7 @@
 #include <list>
 #include <numeric>
 #include <parallel/algorithm>
+#include <thread>
 
 #include <iostream>
 
@@ -18,16 +19,17 @@ size_t pow(size_t base, size_t p) {
 std::vector<size_t> createIndexTable(const std::vector<size_t> &data) {
   std::vector<size_t> index;
   index.resize(data.size());
-  for (auto i = 0; i < data.size(); ++i) {
+  for (size_t i = 0; i < data.size(); ++i) {
     index.at(data.at(i)) = i;
   }
   return index;
 }
 
-/*length < str.size()*/
+/*length <= str.size()*/
 std::string cycl_substr(const std::string &str, size_t left, size_t length) {
-  return left + length < str.size() ? str.substr(left, length)
-                      : str.substr(left) + str.substr(0, length - (str.size() - left));
+  return left + length < str.size()
+             ? str.substr(left, length)
+             : str.substr(left) + str.substr(0, length - (str.size() - left));
 }
 
 void updateSeparatorSection(const std::string &data,
@@ -36,21 +38,17 @@ void updateSeparatorSection(const std::string &data,
                             std::list<size_t>::iterator left_bound,
                             std::list<size_t>::iterator right_bound) {
   auto base = depth_i == 0 ? 0 : pow(2, depth_i - 1);
-  auto depth  = depth_i == 0 ? 1 : base;
-  // std::cout << base << "b" << depth << "d" <<std::endl;
+  auto depth = depth_i == 0 ? 1 : base;
   auto lastOfTheSame =
       cycl_substr(data, (sorted.at(*left_bound) + base) % data.size(), depth);
-  // std::cout << lastOfTheSame << base << "b" << depth << "d" <<std::endl;
   for (auto i = (*left_bound) + 1; i != *right_bound; ++i) {
-    auto current = cycl_substr(data, (sorted.at(i) + base) % data.size(), depth);
-    // std::cout << "lots " << lastOfTheSame << "\ncurr " <<current << std::endl;
+    auto current =
+        cycl_substr(data, (sorted.at(i) + base) % data.size(), depth);
     if (current != lastOfTheSame) {
-      // std::cout << i <<std::endl;
       separators.insert(right_bound, i);
       lastOfTheSame = current;
     }
   }
-  // std::cout <<"section_"<<depth_i<<std::endl;
 }
 
 void updateSeparators(const std::string &data,
@@ -58,70 +56,82 @@ void updateSeparators(const std::string &data,
                       std::list<size_t> &separators, size_t depth_i) {
   auto curr = separators.begin();
   auto prev = curr++;
+  std::vector<std::thread> threads;
+
   for (; curr != separators.end(); prev = curr++) {
-  // std::cout <<"sepupdate_" << *curr<<std::endl;
     if (*prev + 1 != *curr) {
-      // std::cout<< "wut" << std::endl;
-      updateSeparatorSection(data, sorted, separators, depth_i, prev, curr);
+      threads.emplace_back(updateSeparatorSection, std::ref(data),
+                           std::ref(sorted), std::ref(separators), depth_i,
+                           prev, curr);
     }
   }
-  // std::cout <<"sepupdate_"<<std::endl;
+  for (auto &t : threads) {
+    t.join();
+  }
 }
 }
 
 std::tuple<std::string, std::vector<size_t>>
 BWT::transform(const std::string &_data) {
-  const std::string data = "^" + _data;
+  const std::string data = char(2) + _data;
   std::vector<size_t> index, sorted;
 
   sorted.resize(data.size());
   std::iota(sorted.begin(), sorted.end(), 0);
 
-  { // order by 1st char
-    std::sort(sorted.begin(), sorted.end(),
-              [&](const auto &lhs, const auto &rhs) {
-                return data.at(lhs) < data.at(rhs);
-              });
-    index = createIndexTable(sorted);
-  }
+  // order by 1st char
+  __gnu_parallel::sort(sorted.begin(), sorted.end(),
+                       [&](const auto &lhs, const auto &rhs) {
+                         return data.at(lhs) < data.at(rhs);
+                       });
 
   // create separators
   std::list<size_t> separators;
   separators.push_back(0);
   separators.push_back(data.size());
-  
+
   size_t step = 0;
   for (size_t depth = 1; depth < data.size(); depth = depth * 2) {
-    // std::cout <<"???" << std::endl;
-    updateSeparators(data, sorted, separators, step++);
+    auto separatorUpdater =
+        std::thread(updateSeparators, std::ref(data), std::ref(sorted),
+                    std::ref(separators), step++);
+    index = createIndexTable(sorted);
+
+    const auto &ind = index;
+    const auto cmp = [&data, &ind, depth](const size_t &lhs,
+                                          const size_t &rhs) {
+      return ind.at((lhs + depth) % data.size()) <
+             ind.at((rhs + depth) % data.size());
+    };
+    separatorUpdater.join();
+
+    std::vector<std::thread> sorting_threads;
     auto right_it = separators.begin();
     auto left_it = right_it++;
-    // std::cout <<"???" << std::endl;
     for (; right_it != separators.end(); left_it = right_it++) {
       auto l = sorted.begin();
       std::advance(l, *left_it);
-      auto r = sorted.begin();
-      std::advance(r, *right_it);
-
-      std::sort(l, r, [&](const auto &lhs, const auto &rhs) {
-        return index.at((lhs + depth) % data.size()) <
-               index.at((rhs + depth) % data.size());
-      });
+      auto r = l;
+      std::advance(r, *right_it - *left_it);
+      __gnu_parallel::sort(l, r, cmp);
+      /*
+            sorting_threads.emplace_back(
+                static_cast<void (*)(decltype(l), decltype(r), decltype(cmp))>(
+                    __gnu_parallel::sort),
+                l, r, cmp);*/
     }
+
+    for (auto &t : sorting_threads)
+      t.join();
     // std::cout <<"???" << std::endl;
-    index = createIndexTable(sorted);
   }
 
+  index = createIndexTable(sorted);
   std::vector<size_t> indexes;
   indexes.reserve(data.size());
   for (const auto &i : sorted) {
     indexes.push_back(index.at(i == data.size() - 1 ? 0 : i + 1));
   }
-/*
-  for(auto i : sorted)
-  {
-    std::cout << cycl_substr(data, i, data.size()) << std::endl;
-  }*/
 
   return std::tuple<std::string, std::vector<size_t>>{
       std::accumulate(sorted.begin(), sorted.end(), std::string(""),
@@ -135,8 +145,8 @@ BWT::transform(const std::string &_data) {
 std::string BWT::inverse_transform(const std::string &transformed,
                                    const std::vector<size_t> &indexes) {
   std::string result = "";
-  auto index = *indexes.begin(); // drops the deliminiter
-  for (auto i = 0; i < transformed.size(); ++i) {
+  auto index = *indexes.begin();
+  for (size_t i = 0; i < transformed.size(); ++i) {
     result.push_back(transformed.at(index));
     index = indexes.at(index);
   }
