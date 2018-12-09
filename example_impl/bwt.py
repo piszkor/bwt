@@ -5,6 +5,7 @@ def bwt(s):
     # Sorted table
     table_sorted = table[:]
     table_sorted.sort()
+    print(table_sorted)
     # Get index list of ((every string in sorted table)'s next string in unsorted table)'s index in sorted table
     indexlist = []
     for t in table_sorted:
